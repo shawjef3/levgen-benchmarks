@@ -3,7 +3,6 @@ import Data.List.Split (chunksOf)
 import Data.Ord (comparing)
 import System.Environment
 import qualified Data.List as L
-import qualified Data.Vector as V
 import System.Random
 import Random.Xorshift
 import Control.Monad.Random
@@ -17,7 +16,7 @@ data Room = Room
     } deriving (Show)
 
 data Lev = Lev
-    { lRooms :: !(V.Vector Room)
+    { lRooms :: ![Room]
     , lTiles :: [Tile]
     }
 
@@ -26,7 +25,7 @@ levDim = 50
 minWid = 2
 maxWid = 8
 
-genRoom :: V.Vector Room -> Rand Xorshift Room
+genRoom :: [Room] -> Rand Xorshift Room
 genRoom rsDone = do
     x <- getRandom
     y <- getRandom
@@ -41,21 +40,21 @@ genRoom rsDone = do
         then genRoom rsDone
         else return testRoom
 
-genRooms :: Int -> Rand Xorshift (V.Vector Room)
-genRooms n = genRoomsAux n V.empty
+genRooms :: Int -> Rand Xorshift [Room]
+genRooms n = genRoomsAux n []
     where
-        genRoomsAux :: Int -> (V.Vector Room) -> Rand Xorshift (V.Vector Room)
+        genRoomsAux :: Int -> [Room] -> Rand Xorshift [Room]
         genRoomsAux 0 rooms = return rooms
         genRoomsAux n rooms = do
             room <- genRoom rooms
-            genRoomsAux (n-1) (V.cons room rooms)
+            genRoomsAux (n-1) (room:rooms)
 
 checkBound :: Room -> Bool
 checkBound (Room x y w h) =
     x<=0 || y<=0 || x+w >= levDim || y+h >= levDim
 
-checkColl :: Room -> (V.Vector Room) -> Bool
-checkColl room = V.any (roomHitRoom room)
+checkColl :: Room -> [Room] -> Bool
+checkColl room = any (roomHitRoom room)
 
 roomHitRoom :: Room -> Room -> Bool
 roomHitRoom (Room x y w h) (Room x2 y2 w2 h2)
@@ -72,18 +71,18 @@ showTiles = unlines . chunksOf levDim . map toChar
   where toChar Wall = '0'
         toChar Space = '1'
 
-genLevs :: Int -> (V.Vector Lev)-> Rand Xorshift (V.Vector Lev)
+genLevs :: Int -> [Lev]-> Rand Xorshift [Lev]
 genLevs 0 done = return done
 genLevs n done = do
     rooms <- genRooms 50000
     let tiles = map (toTile rooms) [1 .. levDim ^ 2]
-    genLevs (n-1) (V.cons Lev{lRooms = rooms, lTiles = tiles} done)
+    genLevs (n-1) (Lev{lRooms = rooms, lTiles = tiles}:done)
   where
-    toTile rooms n = if (V.any (toPos n `inRoom`) rooms) then Space else Wall
+    toTile rooms n = if (any (toPos n `inRoom`) rooms) then Space else Wall
     toPos n = let (y, x) = quotRem n levDim in (x, y)
 
-biggestLev :: V.Vector Lev -> Lev
-biggestLev = V.maximumBy (comparing (V.length . lRooms))
+biggestLev :: [Lev] -> Lev
+biggestLev = L.maximumBy (comparing (length . lRooms))
 
 main :: IO ()
 main = do
@@ -91,5 +90,5 @@ main = do
     putStr "The random seed is: "
     putStrLn v
     gen <- newXorshift
-    let levs = evalRand (genLevs 1 V.empty) gen
+    let levs = evalRand (genLevs 100 []) gen
     putStr $ showTiles $ lTiles $ biggestLev levs
