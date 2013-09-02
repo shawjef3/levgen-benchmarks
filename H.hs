@@ -2,19 +2,18 @@
 import Data.List.Split (chunksOf)
 import Data.Ord (comparing)
 import System.Environment
+import qualified Data.List as L
 import qualified Data.Vector as V
-import qualified Data.Vector.Unboxed as U
 import System.Random
 import Random.Xorshift
+import Control.Monad.Random
 
 type Pos = (Int,Int)
-type RandInts = U.Vector Int
 
 data Tile = Wall | Space deriving (Show)
 
 data Room = Room
-    { rPos :: !Pos
-    , rw, rh :: !Int
+    { rx, ry, rw, rh :: !Int
     } deriving (Show)
 
 data Lev = Lev
@@ -27,55 +26,60 @@ levDim = 50
 minWid = 2
 maxWid = 8
 
-genRooms :: Int -> RandInts -> V.Vector Room -> (V.Vector Room,RandInts)
-genRooms 0 rands done = (done,rands)
-genRooms !n randInts rsDone =
-    if checkBound tr
-    then noFit
-    else if checkColl tr rsDone
-         then noFit
-         else genRooms (n-1) (restInts) (V.cons tr rsDone)
-  where
-    noFit    = genRooms (n-1) (restInts) rsDone
-    tr       = Room {rPos=(x,y), rw= w, rh= h}
-    x        = rem (U.unsafeHead randInts) levDim
-    y        = rem (U.unsafeIndex randInts 1) levDim
-    restInts = U.unsafeDrop 2 randInts
-    w        = rem (U.unsafeHead randInts) maxWid + minWid
-    h        = rem (U.unsafeIndex randInts 1) maxWid + minWid
+genRoom :: V.Vector Room -> Rand Xorshift Room
+genRoom rsDone = do
+    x <- getRandom
+    y <- getRandom
+    w <- getRandom
+    h <- getRandom
+    let x' = rem x levDim
+    let y' = rem y levDim
+    let w' = rem w maxWid + minWid
+    let h' = rem h maxWid + minWid
+    let testRoom = Room {rx = x', ry = y', rw= w', rh= h'}
+    if checkBound testRoom || checkColl testRoom rsDone
+        then genRoom rsDone
+        else return testRoom
+
+genRooms :: Int -> Rand Xorshift (V.Vector Room)
+genRooms n = genRoomsAux n V.empty
+    where
+        genRoomsAux :: Int -> (V.Vector Room) -> Rand Xorshift (V.Vector Room)
+        genRoomsAux 0 rooms = return rooms
+        genRoomsAux n rooms = do
+            room <- genRoom rooms
+            genRoomsAux (n-1) (V.cons room rooms)
 
 checkBound :: Room -> Bool
-checkBound Room { rPos = (x,y), rw = w, rh = h } =
+checkBound (Room x y w h) =
     x<=0 || y<=0 || x+w >= levDim || y+h >= levDim
 
-checkColl :: Room -> V.Vector Room -> Bool
+checkColl :: Room -> (V.Vector Room) -> Bool
 checkColl room = V.any (roomHitRoom room)
 
 roomHitRoom :: Room -> Room -> Bool
-roomHitRoom Room {rPos=(x,y), rw= w, rh= h} Room {rPos=( x2, y2), rw= w2, rh= h2}
+roomHitRoom (Room x y w h) (Room x2 y2 w2 h2)
     = not ((x2+w2+1) < x || x2 > (x+w+1)
         || (y2+h2+1) < y || y2 > (y+h+1))
 
 inRoom :: Pos -> Room -> Bool
-inRoom (x, y) (Room (rx, ry) rw rh) =
+inRoom (x, y) (Room rx ry rw rh) =
         (rx <= x) && (x < rx + rw)
     &&  (ry <= y) && (y < ry + rh)
 
 showTiles :: [Tile] -> String
 showTiles = unlines . chunksOf levDim . map toChar
-  where
-    toChar t = case t of
-        Wall  -> '0'
-        Space -> '1'
+  where toChar Wall = '0'
+        toChar Space = '1'
 
-genLevs' :: Int -> V.Vector Lev -> RandInts -> (V.Vector Lev,RandInts)
-genLevs' 0 done rands = (done,rands)
-genLevs' n ldone randInts =
-    genLevs' (n-1) ( V.cons Lev{lRooms = rs, lTiles = tiles} ldone) rands
+genLevs :: Int -> (V.Vector Lev)-> Rand Xorshift (V.Vector Lev)
+genLevs 0 done = return done
+genLevs n done = do
+    rooms <- genRooms 50000
+    let tiles = map (toTile rooms) [1 .. levDim ^ 2]
+    genLevs (n-1) (V.cons Lev{lRooms = rooms, lTiles = tiles} done)
   where
-    (rs,rands) = genRooms 50000 (randInts) V.empty
-    toTile n = if (V.any (toPos n `inRoom`) rs) then Space else Wall
-    tiles = map toTile [1 .. levDim ^ 2]
+    toTile rooms n = if (V.any (toPos n `inRoom`) rooms) then Space else Wall
     toPos n = let (y, x) = quotRem n levDim in (x, y)
 
 biggestLev :: V.Vector Lev -> Lev
@@ -87,6 +91,5 @@ main = do
     putStr "The random seed is: "
     putStrLn v
     gen <- newXorshift
-    let rands = U.unfoldrN 10000000 (Just . next) gen
-    let (levs, _) = genLevs' 100 V.empty rands
+    let levs = evalRand (genLevs 1 V.empty) gen
     putStr $ showTiles $ lTiles $ biggestLev levs
