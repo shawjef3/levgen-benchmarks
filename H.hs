@@ -1,53 +1,66 @@
-{-# LANGUAGE BangPatterns #-}
 import Data.List.Split (chunksOf)
 import Data.Ord (comparing)
 import System.Environment
 import qualified Data.List as L
 import System.Random
 import Random.Xorshift
+import Control.Monad
 import Control.Monad.Random
+import Control.Concurrent
+import Control.Concurrent.MVar
+import Control.DeepSeq
 
 type Pos = (Int,Int)
 
 data Tile = Wall | Space deriving (Show)
 
+instance NFData Tile
+
 data Room = Room
-    { rx, ry, rw, rh :: !Int
+    { rx, ry, rw, rh :: Int
     } deriving (Show)
 
+instance NFData Room where
+    rnf (Room rx ry rw rh) = rx `seq` ry `seq` rw `seq` rh `seq` ()
+
 data Lev = Lev
-    { lRooms :: ![Room]
+    { lRooms :: [Room]
     , lTiles :: [Tile]
     }
+
+instance NFData Lev where
+    rnf (Lev lRooms lTiles) = lRooms `deepseq` lTiles `deepseq` ()
 
 levDim, minWid, maxWid :: Int
 levDim = 50
 minWid = 2
 maxWid = 8
 
-genRoom :: [Room] -> Rand Xorshift Room
-genRoom rsDone = do
-    x <- getRandom
-    y <- getRandom
-    w <- getRandom
-    h <- getRandom
-    let x' = rem x levDim
-    let y' = rem y levDim
-    let w' = rem w maxWid + minWid
-    let h' = rem h maxWid + minWid
-    let testRoom = Room {rx = x', ry = y', rw= w', rh= h'}
-    if checkBound testRoom || checkColl testRoom rsDone
-        then genRoom rsDone
-        else return testRoom
+genRoom :: Rand Xorshift Room
+genRoom = do
+    r1 <- getRandom
+    r2 <- getRandom
+    r3 <- getRandom
+    r4 <- getRandom
+    let x = rem r1 levDim
+    let y = rem r2 levDim
+    let w = rem r3 maxWid + minWid
+    let h = rem r4 maxWid + minWid
+    return Room {rx = x, ry = y, rw = w, rh = h}
 
-genRooms :: Int -> Rand Xorshift [Room]
-genRooms n = genRoomsAux n []
-    where
-        genRoomsAux :: Int -> [Room] -> Rand Xorshift [Room]
-        genRoomsAux 0 rooms = return rooms
-        genRoomsAux n rooms = do
-            room <- genRoom rooms
-            genRoomsAux (n-1) (room:rooms)
+genGoodRooms :: Int -> Rand Xorshift [Room]
+genGoodRooms n = aux n []
+    where aux 0 accum = return accum
+          aux count accum = do
+            room <- genRoom
+            if goodRoom accum room
+                then aux (count-1) (room:accum)
+                else aux count accum
+
+goodRoom :: [Room] -> Room -> Bool
+goodRoom rooms room =
+    let good = not (checkBound room || checkColl room rooms) in
+    good
 
 checkBound :: Room -> Bool
 checkBound (Room x y w h) =
@@ -71,15 +84,24 @@ showTiles = unlines . chunksOf levDim . map toChar
   where toChar Wall = '0'
         toChar Space = '1'
 
-genLevs :: Int -> [Lev]-> Rand Xorshift [Lev]
-genLevs 0 done = return done
-genLevs n done = do
-    rooms <- genRooms 50000
+genLevel :: Rand Xorshift Lev
+genLevel = do
+    rooms <- genGoodRooms 100
     let tiles = map (toTile rooms) [1 .. levDim ^ 2]
-    genLevs (n-1) (Lev{lRooms = rooms, lTiles = tiles}:done)
+    return $ Lev{lRooms = rooms, lTiles = tiles}
   where
     toTile rooms n = if (any (toPos n `inRoom`) rooms) then Space else Wall
     toPos n = let (y, x) = quotRem n levDim in (x, y)
+
+genLevelMVar :: Int -> IO (MVar Lev)
+genLevelMVar seed =
+    let gen = makeXorshift seed in
+    do levelVar <- newEmptyMVar
+       forkIO (let level = evalRand genLevel gen in level `deepseq` putMVar levelVar level)
+       return levelVar
+
+genLevels :: [Int] -> IO [MVar Lev]
+genLevels = mapM genLevelMVar
 
 biggestLev :: [Lev] -> Lev
 biggestLev = L.maximumBy (comparing (length . lRooms))
@@ -89,6 +111,9 @@ main = do
     (v:_) <- getArgs
     putStr "The random seed is: "
     putStrLn v
+    let levelCount = read v
     gen <- newXorshift
-    let levs = evalRand (genLevs 100 []) gen
-    putStr $ showTiles $ lTiles $ biggestLev levs
+    let (rand,_) = next gen
+    levels <- genLevels [rand .. rand+levelCount]
+    levels <- mapM readMVar levels
+    putStr $ showTiles $ lTiles $ biggestLev levels
